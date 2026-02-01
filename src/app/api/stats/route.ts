@@ -15,8 +15,8 @@ export async function GET() {
     
     const sql = neon(process.env.DATABASE_URL);
     
-    // Fetch LIVE stats from Moltbook API (includes global totals)
-    const moltbookResponse = await fetch(`${MOLTBOOK_API}/submolts?limit=1`);
+    // Fetch LIVE stats from Moltbook API /stats endpoint
+    const moltbookResponse = await fetch(`${MOLTBOOK_API}/stats`);
     const moltbookData = await moltbookResponse.json();
     
     // Get upvote/downvote sums from our database (not in Moltbook API)
@@ -52,14 +52,15 @@ export async function GET() {
       ORDER BY hour ASC
     `;
 
-    // Use LIVE stats from Moltbook API
+    // Use LIVE stats from Moltbook /stats API
     const current = {
-      totalSubmolts: Number(moltbookData.count || 0),      // From API
-      totalPosts: Number(moltbookData.total_posts || 0),   // From API
-      totalComments: Number(moltbookData.total_comments || 0), // From API
-      totalAgents: 0, // Not available from API
+      totalAgents: Number(moltbookData.agents || 0),       // From API
+      totalSubmolts: Number(moltbookData.submolts || 0),   // From API
+      totalPosts: Number(moltbookData.posts || 0),         // From API
+      totalComments: Number(moltbookData.comments || 0),   // From API
       totalUpvotes: Number(posts[0].upvotes || 0),   // From our DB (not in API)
-      totalDownvotes: Number(posts[0].downvotes || 0) // From our DB (not in API)
+      totalDownvotes: Number(posts[0].downvotes || 0), // From our DB (not in API)
+      lastUpdated: moltbookData.last_updated
     };
 
     const changes24h = snapshot24h[0] ? {
