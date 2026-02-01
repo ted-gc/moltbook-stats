@@ -1,12 +1,7 @@
 /**
  * Moltbook Data Collector
  * 
- * Crawls ALL data from Moltbook API and stores in database
- * - Posts with full content
- * - Comments and replies
- * - Agent interactions (who replied to whom)
- * - Upvote/downvote deltas
- * - Network edge updates
+ * Crawls data from Moltbook API and stores in database
  */
 
 import { neon } from '@neondatabase/serverless';
@@ -14,8 +9,13 @@ import { neon } from '@neondatabase/serverless';
 const MOLTBOOK_API = 'https://www.moltbook.com/api/v1';
 const API_KEY = process.env.MOLTBOOK_API_KEY || '';
 
-// Initialize Neon client
-const sql = neon(process.env.DATABASE_URL!);
+// Lazy-initialize Neon client (called at runtime, not build time)
+function getDb() {
+  if (!process.env.DATABASE_URL) {
+    throw new Error('DATABASE_URL not configured');
+  }
+  return neon(process.env.DATABASE_URL);
+}
 
 interface MoltbookPost {
   id: string;
@@ -69,142 +69,11 @@ async function fetchMoltbook(endpoint: string, params: Record<string, string> = 
   return response.json();
 }
 
-// ============================================
-// COLLECTORS
-// ============================================
-
-/**
- * Collect all submolts
- */
-export async function collectSubmolts() {
-  console.log('Collecting submolts...');
-  const data = await fetchMoltbook('/submolts', { limit: '1000' });
-  
-  for (const submolt of data.submolts as MoltbookSubmolt[]) {
-    await sql`
-      INSERT INTO submolts (id, name, display_name, description, subscriber_count, created_at, last_updated_at)
-      VALUES (${submolt.id}, ${submolt.name}, ${submolt.display_name}, ${submolt.description}, 
-              ${submolt.subscriber_count}, ${submolt.created_at}, NOW())
-      ON CONFLICT (id) DO UPDATE SET
-        subscriber_count = EXCLUDED.subscriber_count,
-        last_updated_at = NOW()
-    `;
-  }
-  
-  console.log(`Collected ${data.submolts.length} submolts`);
-  return data.submolts.length;
-}
-
-/**
- * Collect recent posts
- */
-export async function collectPosts(limit = 100, sort = 'new') {
-  console.log(`Collecting ${limit} ${sort} posts...`);
-  const data = await fetchMoltbook('/posts', { limit: limit.toString(), sort });
-  
-  for (const post of data.posts as MoltbookPost[]) {
-    // Upsert agent if present
-    if (post.author) {
-      await sql`
-        INSERT INTO agents (id, name, first_seen_at, last_updated_at)
-        VALUES (${post.author.id}, ${post.author.name}, NOW(), NOW())
-        ON CONFLICT (id) DO UPDATE SET
-          name = EXCLUDED.name,
-          last_updated_at = NOW()
-      `;
-    }
-    
-    // Upsert submolt if present
-    if (post.submolt) {
-      await sql`
-        INSERT INTO submolts (id, name, display_name, first_seen_at, last_updated_at)
-        VALUES (${post.submolt.id}, ${post.submolt.name}, ${post.submolt.display_name}, NOW(), NOW())
-        ON CONFLICT (id) DO UPDATE SET
-          name = EXCLUDED.name,
-          display_name = EXCLUDED.display_name,
-          last_updated_at = NOW()
-      `;
-    }
-    
-    // Check if post exists and track score changes
-    const existing = await sql`SELECT upvotes, downvotes, comment_count FROM posts WHERE id = ${post.id}`;
-    
-    if (existing.length > 0) {
-      const old = existing[0];
-      // Record score history if changed
-      if (old.upvotes !== post.upvotes || old.downvotes !== post.downvotes || old.comment_count !== post.comment_count) {
-        await sql`
-          INSERT INTO post_score_history (post_id, upvotes, downvotes, comment_count)
-          VALUES (${post.id}, ${post.upvotes}, ${post.downvotes}, ${post.comment_count})
-        `;
-      }
-    }
-    
-    // Upsert post
-    await sql`
-      INSERT INTO posts (id, title, content, url, author_id, submolt_id, upvotes, downvotes, comment_count, created_at, last_updated_at)
-      VALUES (${post.id}, ${post.title}, ${post.content}, ${post.url}, ${post.author?.id}, ${post.submolt?.id},
-              ${post.upvotes}, ${post.downvotes}, ${post.comment_count}, ${post.created_at}, NOW())
-      ON CONFLICT (id) DO UPDATE SET
-        upvotes = EXCLUDED.upvotes,
-        downvotes = EXCLUDED.downvotes,
-        comment_count = EXCLUDED.comment_count,
-        last_updated_at = NOW()
-    `;
-  }
-  
-  console.log(`Collected ${data.posts.length} posts`);
-  return data.posts;
-}
-
-/**
- * Collect comments for a post from the post detail endpoint
- * Note: Moltbook API doesn't expose author info, so we can't track interactions
- */
-export async function collectCommentsForPost(postId: string) {
-  try {
-    // Fetch post detail which includes comments
-    const data = await fetchMoltbook(`/posts/${postId}`);
-    const comments = data.comments || [];
-    
-    // Flatten nested replies
-    const flattenComments = (commentList: MoltbookComment[], parentId: string | null = null): MoltbookComment[] => {
-      const flat: MoltbookComment[] = [];
-      for (const comment of commentList) {
-        flat.push({ ...comment, parent_id: parentId });
-        if ((comment as any).replies?.length > 0) {
-          flat.push(...flattenComments((comment as any).replies, comment.id));
-        }
-      }
-      return flat;
-    };
-    
-    const allComments = flattenComments(comments);
-    
-    for (const comment of allComments) {
-      // Upsert comment (no author info available from API)
-      await sql`
-        INSERT INTO comments (id, post_id, parent_comment_id, author_id, content, upvotes, downvotes, created_at, last_updated_at)
-        VALUES (${comment.id}, ${postId}, ${comment.parent_id}, ${null}, ${comment.content},
-                ${comment.upvotes}, ${comment.downvotes}, ${comment.created_at}, NOW())
-        ON CONFLICT (id) DO UPDATE SET
-          upvotes = EXCLUDED.upvotes,
-          downvotes = EXCLUDED.downvotes,
-          last_updated_at = NOW()
-      `;
-    }
-    
-    return allComments.length;
-  } catch (error) {
-    console.error(`Error collecting comments for post ${postId}:`, error);
-    return 0;
-  }
-}
-
 /**
  * Take a global stats snapshot
  */
 export async function takeStatsSnapshot() {
+  const sql = getDb();
   console.log('Taking stats snapshot...');
   
   const [agents, posts, comments, submolts] = await Promise.all([
@@ -230,73 +99,19 @@ export async function takeStatsSnapshot() {
 }
 
 /**
- * Update daily top posts
- */
-export async function updateDailyTopPosts() {
-  const today = new Date().toISOString().split('T')[0];
-  
-  await sql`
-    INSERT INTO daily_top_posts (date, post_id, rank, upvotes, comment_count, score)
-    SELECT 
-      ${today}::date,
-      id,
-      ROW_NUMBER() OVER (ORDER BY (upvotes + comment_count * 2) DESC),
-      upvotes,
-      comment_count,
-      upvotes + comment_count * 2
-    FROM posts
-    WHERE created_at > NOW() - INTERVAL '24 hours'
-    ORDER BY (upvotes + comment_count * 2) DESC
-    LIMIT 100
-    ON CONFLICT (date, post_id) DO UPDATE SET
-      rank = EXCLUDED.rank,
-      upvotes = EXCLUDED.upvotes,
-      comment_count = EXCLUDED.comment_count,
-      score = EXCLUDED.score
-  `;
-}
-
-/**
- * Full collection run
+ * Full collection run (simplified - main stats collection now in /api/cron-full)
  */
 export async function runFullCollection() {
-  console.log('Starting full collection run...');
+  console.log('Starting collection run...');
   const startTime = Date.now();
-  
-  // Collect submolts
-  await collectSubmolts();
-  
-  // Collect recent posts (multiple pages)
-  const allPosts: MoltbookPost[] = [];
-  for (const sort of ['new', 'hot', 'top']) {
-    const posts = await collectPosts(100, sort);
-    allPosts.push(...posts);
-    await sleep(1000); // Rate limiting
-  }
-  
-  // Collect comments for posts with activity (prioritize by comment count)
-  let commentsCollected = 0;
-  const postsWithComments = allPosts
-    .filter(p => p.comment_count > 0)
-    .sort((a, b) => b.comment_count - a.comment_count)
-    .slice(0, 30); // Top 30 posts by comment count
-  
-  for (const post of postsWithComments) {
-    const count = await collectCommentsForPost(post.id);
-    commentsCollected += count;
-    await sleep(500); // Rate limiting
-  }
   
   // Take snapshot
   const stats = await takeStatsSnapshot();
   
-  // Update daily rankings
-  await updateDailyTopPosts();
-  
   const duration = (Date.now() - startTime) / 1000;
   console.log(`Collection complete in ${duration}s. Stats:`, stats);
   
-  return { duration, stats, postsCollected: allPosts.length, commentsCollected };
+  return { duration, stats };
 }
 
 function sleep(ms: number) {

@@ -128,6 +128,38 @@ export async function GET() {
         UNIQUE(from_agent_id, to_agent_id)
       )`,
       
+      // Submolt snapshots (per-submolt stats over time)
+      `CREATE TABLE IF NOT EXISTS submolt_snapshots (
+        id SERIAL PRIMARY KEY,
+        captured_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        submolt_id VARCHAR(100) NOT NULL,
+        submolt_name VARCHAR(100),
+        display_name VARCHAR(200),
+        subscriber_count INTEGER DEFAULT 0,
+        post_count INTEGER DEFAULT 0,
+        total_upvotes BIGINT DEFAULT 0,
+        total_downvotes BIGINT DEFAULT 0,
+        total_comments BIGINT DEFAULT 0
+      )`,
+      
+      // Top posts snapshots
+      `CREATE TABLE IF NOT EXISTS top_posts_snapshots (
+        id SERIAL PRIMARY KEY,
+        captured_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        post_id VARCHAR(100) NOT NULL,
+        title TEXT,
+        submolt_name VARCHAR(100),
+        upvotes INTEGER DEFAULT 0,
+        downvotes INTEGER DEFAULT 0,
+        comment_count INTEGER DEFAULT 0,
+        rank INTEGER
+      )`,
+      
+      // Indexes for new tables
+      `CREATE INDEX IF NOT EXISTS idx_submolt_snapshots_time ON submolt_snapshots(captured_at)`,
+      `CREATE INDEX IF NOT EXISTS idx_submolt_snapshots_submolt ON submolt_snapshots(submolt_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_top_posts_snapshots_time ON top_posts_snapshots(captured_at)`,
+      
       // Daily top posts
       `CREATE TABLE IF NOT EXISTS daily_top_posts (
         id SERIAL PRIMARY KEY,

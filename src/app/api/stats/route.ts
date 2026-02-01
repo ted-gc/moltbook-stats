@@ -39,17 +39,17 @@ export async function GET() {
       LIMIT 1
     `;
 
-    // Get recent history (last 7 days, hourly)
+    // Get recent history (last 24 hours, per-minute granularity)
     const history = await sql`
       SELECT 
-        DATE_TRUNC('hour', captured_at) as hour,
-        AVG(total_agents) as agents,
-        AVG(total_posts) as posts,
-        AVG(total_comments) as comments
+        captured_at as timestamp,
+        total_agents as agents,
+        total_submolts as submolts,
+        total_posts as posts,
+        total_comments as comments
       FROM stats_snapshots
-      WHERE captured_at > NOW() - INTERVAL '7 days'
-      GROUP BY DATE_TRUNC('hour', captured_at)
-      ORDER BY hour ASC
+      WHERE captured_at > NOW() - INTERVAL '24 hours'
+      ORDER BY captured_at ASC
     `;
 
     // Use LIVE stats from Moltbook /stats API
@@ -74,8 +74,9 @@ export async function GET() {
       changes24h,
       lastSnapshot: latestSnapshot[0]?.captured_at,
       history: history.map(h => ({
-        timestamp: h.hour,
+        timestamp: h.timestamp,
         agents: Number(h.agents),
+        submolts: Number(h.submolts),
         posts: Number(h.posts),
         comments: Number(h.comments)
       }))
