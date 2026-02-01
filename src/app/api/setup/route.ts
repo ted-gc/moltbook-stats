@@ -151,11 +151,16 @@ export async function GET() {
     const results = [];
     for (const statement of statements) {
       try {
-        await sql(statement);
+        await sql.transaction([sql`${sql.unsafe(statement)}`]);
         results.push({ status: 'ok', statement: statement.substring(0, 50) + '...' });
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Unknown error';
-        results.push({ status: 'error', error: message, statement: statement.substring(0, 50) + '...' });
+        // Ignore "already exists" errors
+        if (!message.includes('already exists')) {
+          results.push({ status: 'error', error: message, statement: statement.substring(0, 50) + '...' });
+        } else {
+          results.push({ status: 'exists', statement: statement.substring(0, 50) + '...' });
+        }
       }
     }
     
