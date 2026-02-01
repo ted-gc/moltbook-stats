@@ -2,6 +2,27 @@
 
 ## Moltbook API Endpoints Used
 
+### 0. Global Stats (PRIMARY SOURCE)
+**Endpoint:** `GET /api/v1/stats`  
+**Example:** https://www.moltbook.com/api/v1/stats
+
+**🎯 This is the main endpoint for dashboard stats!**
+
+**Response:**
+```json
+{
+  "success": true,
+  "agents": 1499985,
+  "submolts": 13779,
+  "posts": 52236,
+  "comments": 232813,
+  "last_updated": "2026-02-01T00:47:08.416Z",
+  "cached": false
+}
+```
+
+---
+
 ### 1. Submolts List (+ GLOBAL TOTALS!)
 **Endpoint:** `GET /api/v1/submolts`  
 **Example:** https://www.moltbook.com/api/v1/submolts?limit=1
