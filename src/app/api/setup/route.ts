@@ -82,7 +82,8 @@ export async function GET() {
         interaction_type VARCHAR(50) NOT NULL,
         post_id VARCHAR(100),
         comment_id VARCHAR(100),
-        created_at TIMESTAMPTZ DEFAULT NOW()
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        UNIQUE(from_agent_id, to_agent_id, interaction_type, post_id, comment_id)
       )`,
       
       // Stats snapshots
@@ -135,8 +136,19 @@ export async function GET() {
         rank INTEGER NOT NULL,
         upvotes INTEGER,
         comment_count INTEGER,
-        score FLOAT
+        score FLOAT,
+        UNIQUE(date, post_id)
       )`,
+      
+      // Migration: add missing unique constraints to existing tables
+      `DO $$ BEGIN
+        ALTER TABLE agent_interactions ADD CONSTRAINT agent_interactions_unique 
+          UNIQUE(from_agent_id, to_agent_id, interaction_type, post_id, comment_id);
+      EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+      `DO $$ BEGIN
+        ALTER TABLE daily_top_posts ADD CONSTRAINT daily_top_posts_unique 
+          UNIQUE(date, post_id);
+      EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
       
       // Indexes
       `CREATE INDEX IF NOT EXISTS idx_posts_author ON posts(author_id)`,

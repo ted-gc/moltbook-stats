@@ -3,6 +3,8 @@ import { neon } from '@neondatabase/serverless';
 
 export const dynamic = 'force-dynamic';
 
+const MOLTBOOK_API = 'https://www.moltbook.com/api/v1';
+
 export async function GET() {
   try {
     if (!process.env.DATABASE_URL) {
@@ -13,12 +15,13 @@ export async function GET() {
     
     const sql = neon(process.env.DATABASE_URL);
     
-    // Get current totals
-    const [agents, posts, comments, submolts] = await Promise.all([
-      sql`SELECT COUNT(*) as count FROM agents`,
-      sql`SELECT COUNT(*) as count, SUM(upvotes) as upvotes, SUM(downvotes) as downvotes FROM posts`,
-      sql`SELECT COUNT(*) as count FROM comments`,
-      sql`SELECT COUNT(*) as count FROM submolts`
+    // Fetch LIVE stats from Moltbook API (includes global totals)
+    const moltbookResponse = await fetch(`${MOLTBOOK_API}/submolts?limit=1`);
+    const moltbookData = await moltbookResponse.json();
+    
+    // Get upvote/downvote sums from our database (not in Moltbook API)
+    const [posts] = await Promise.all([
+      sql`SELECT SUM(upvotes) as upvotes, SUM(downvotes) as downvotes FROM posts`
     ]);
 
     // Get latest snapshot for comparison
@@ -49,14 +52,14 @@ export async function GET() {
       ORDER BY hour ASC
     `;
 
-    // Calculate changes
+    // Use LIVE stats from Moltbook API
     const current = {
-      totalAgents: Number(agents[0].count),
-      totalPosts: Number(posts[0].count),
-      totalComments: Number(comments[0].count),
-      totalSubmolts: Number(submolts[0].count),
-      totalUpvotes: Number(posts[0].upvotes || 0),
-      totalDownvotes: Number(posts[0].downvotes || 0)
+      totalSubmolts: Number(moltbookData.count || 0),      // From API
+      totalPosts: Number(moltbookData.total_posts || 0),   // From API
+      totalComments: Number(moltbookData.total_comments || 0), // From API
+      totalAgents: 0, // Not available from API
+      totalUpvotes: Number(posts[0].upvotes || 0),   // From our DB (not in API)
+      totalDownvotes: Number(posts[0].downvotes || 0) // From our DB (not in API)
     };
 
     const changes24h = snapshot24h[0] ? {

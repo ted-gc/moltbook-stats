@@ -9,29 +9,13 @@
  * - Network edge updates
  */
 
-import { neon, NeonQueryFunction } from '@neondatabase/serverless';
+import { neon } from '@neondatabase/serverless';
 
 const MOLTBOOK_API = 'https://www.moltbook.com/api/v1';
 const API_KEY = process.env.MOLTBOOK_API_KEY || '';
 
-// Initialize Neon client (lazy - only fails when actually used without DATABASE_URL)
-let _sql: NeonQueryFunction<false, false> | null = null;
-function getSql() {
-  if (!_sql) {
-    if (!process.env.DATABASE_URL) {
-      throw new Error('DATABASE_URL not configured');
-    }
-    _sql = neon(process.env.DATABASE_URL);
-  }
-  return _sql;
-}
-const sql = new Proxy({} as NeonQueryFunction<false, false>, {
-  apply: (_, __, args) => getSql()(...args as [TemplateStringsArray, ...unknown[]]),
-  get: (_, prop) => {
-    if (prop === 'unsafe') return (...args: unknown[]) => (getSql() as any).unsafe(...args);
-    return (getSql() as any)[prop];
-  }
-});
+// Initialize Neon client
+const sql = neon(process.env.DATABASE_URL!);
 
 interface MoltbookPost {
   id: string;
@@ -174,79 +158,43 @@ export async function collectPosts(limit = 100, sort = 'new') {
 }
 
 /**
- * Collect comments for a post and build interaction graph
+ * Collect comments for a post from the post detail endpoint
+ * Note: Moltbook API doesn't expose author info, so we can't track interactions
  */
 export async function collectCommentsForPost(postId: string) {
   try {
-    const data = await fetchMoltbook(`/posts/${postId}/comments`, { limit: '500' });
-    const post = await sql`SELECT author_id FROM posts WHERE id = ${postId}`;
-    const postAuthorId = post[0]?.author_id;
+    // Fetch post detail which includes comments
+    const data = await fetchMoltbook(`/posts/${postId}`);
+    const comments = data.comments || [];
     
-    for (const comment of (data.comments || []) as MoltbookComment[]) {
-      // Upsert commenter
-      if (comment.author) {
-        await sql`
-          INSERT INTO agents (id, name, first_seen_at, last_updated_at)
-          VALUES (${comment.author.id}, ${comment.author.name}, NOW(), NOW())
-          ON CONFLICT (id) DO UPDATE SET
-            name = EXCLUDED.name,
-            last_updated_at = NOW()
-        `;
+    // Flatten nested replies
+    const flattenComments = (commentList: MoltbookComment[], parentId: string | null = null): MoltbookComment[] => {
+      const flat: MoltbookComment[] = [];
+      for (const comment of commentList) {
+        flat.push({ ...comment, parent_id: parentId });
+        if ((comment as any).replies?.length > 0) {
+          flat.push(...flattenComments((comment as any).replies, comment.id));
+        }
       }
-      
-      // Upsert comment
+      return flat;
+    };
+    
+    const allComments = flattenComments(comments);
+    
+    for (const comment of allComments) {
+      // Upsert comment (no author info available from API)
       await sql`
         INSERT INTO comments (id, post_id, parent_comment_id, author_id, content, upvotes, downvotes, created_at, last_updated_at)
-        VALUES (${comment.id}, ${postId}, ${comment.parent_id}, ${comment.author?.id}, ${comment.content},
+        VALUES (${comment.id}, ${postId}, ${comment.parent_id}, ${null}, ${comment.content},
                 ${comment.upvotes}, ${comment.downvotes}, ${comment.created_at}, NOW())
         ON CONFLICT (id) DO UPDATE SET
           upvotes = EXCLUDED.upvotes,
           downvotes = EXCLUDED.downvotes,
           last_updated_at = NOW()
       `;
-      
-      // Record interaction: commenter -> post author
-      if (comment.author?.id && postAuthorId && comment.author.id !== postAuthorId) {
-        await sql`
-          INSERT INTO agent_interactions (from_agent_id, to_agent_id, interaction_type, post_id, comment_id)
-          VALUES (${comment.author.id}, ${postAuthorId}, 'comment_on_post', ${postId}, ${comment.id})
-          ON CONFLICT DO NOTHING
-        `;
-        
-        // Update network edge
-        await sql`
-          INSERT INTO network_edges (from_agent_id, to_agent_id, edge_weight, last_interaction_at)
-          VALUES (${comment.author.id}, ${postAuthorId}, 1, NOW())
-          ON CONFLICT (from_agent_id, to_agent_id) DO UPDATE SET
-            edge_weight = network_edges.edge_weight + 1,
-            last_interaction_at = NOW()
-        `;
-      }
-      
-      // If reply to another comment, record that interaction too
-      if (comment.parent_id && comment.author?.id) {
-        const parentComment = await sql`SELECT author_id FROM comments WHERE id = ${comment.parent_id}`;
-        const parentAuthorId = parentComment[0]?.author_id;
-        
-        if (parentAuthorId && comment.author.id !== parentAuthorId) {
-          await sql`
-            INSERT INTO agent_interactions (from_agent_id, to_agent_id, interaction_type, post_id, comment_id)
-            VALUES (${comment.author.id}, ${parentAuthorId}, 'reply_to_comment', ${postId}, ${comment.id})
-            ON CONFLICT DO NOTHING
-          `;
-          
-          await sql`
-            INSERT INTO network_edges (from_agent_id, to_agent_id, edge_weight, last_interaction_at)
-            VALUES (${comment.author.id}, ${parentAuthorId}, 1, NOW())
-            ON CONFLICT (from_agent_id, to_agent_id) DO UPDATE SET
-              edge_weight = network_edges.edge_weight + 1,
-              last_interaction_at = NOW()
-          `;
-        }
-      }
     }
     
-    return data.comments?.length || 0;
+    return allComments.length;
   } catch (error) {
     console.error(`Error collecting comments for post ${postId}:`, error);
     return 0;
@@ -326,14 +274,17 @@ export async function runFullCollection() {
     await sleep(1000); // Rate limiting
   }
   
-  // Collect comments for posts with activity
+  // Collect comments for posts with activity (prioritize by comment count)
   let commentsCollected = 0;
-  for (const post of allPosts.slice(0, 50)) { // Top 50 posts
-    if (post.comment_count > 0) {
-      const count = await collectCommentsForPost(post.id);
-      commentsCollected += count;
-      await sleep(500); // Rate limiting
-    }
+  const postsWithComments = allPosts
+    .filter(p => p.comment_count > 0)
+    .sort((a, b) => b.comment_count - a.comment_count)
+    .slice(0, 30); // Top 30 posts by comment count
+  
+  for (const post of postsWithComments) {
+    const count = await collectCommentsForPost(post.id);
+    commentsCollected += count;
+    await sleep(500); // Rate limiting
   }
   
   // Take snapshot
