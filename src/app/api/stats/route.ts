@@ -3,10 +3,16 @@ import { neon } from '@neondatabase/serverless';
 
 export const dynamic = 'force-dynamic';
 
-const sql = neon(process.env.DATABASE_URL!);
-
 export async function GET() {
   try {
+    if (!process.env.DATABASE_URL) {
+      return NextResponse.json({ 
+        error: 'DATABASE_URL not configured. Add Neon Postgres integration in Vercel.' 
+      }, { status: 500 });
+    }
+    
+    const sql = neon(process.env.DATABASE_URL);
+    
     // Get current totals
     const [agents, posts, comments, submolts] = await Promise.all([
       sql`SELECT COUNT(*) as count FROM agents`,

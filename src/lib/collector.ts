@@ -9,13 +9,29 @@
  * - Network edge updates
  */
 
-import { neon } from '@neondatabase/serverless';
+import { neon, NeonQueryFunction } from '@neondatabase/serverless';
 
 const MOLTBOOK_API = 'https://www.moltbook.com/api/v1';
-const API_KEY = process.env.MOLTBOOK_API_KEY!;
+const API_KEY = process.env.MOLTBOOK_API_KEY || '';
 
-// Initialize Neon client
-const sql = neon(process.env.DATABASE_URL!);
+// Initialize Neon client (lazy - only fails when actually used without DATABASE_URL)
+let _sql: NeonQueryFunction<false, false> | null = null;
+function getSql() {
+  if (!_sql) {
+    if (!process.env.DATABASE_URL) {
+      throw new Error('DATABASE_URL not configured');
+    }
+    _sql = neon(process.env.DATABASE_URL);
+  }
+  return _sql;
+}
+const sql = new Proxy({} as NeonQueryFunction<false, false>, {
+  apply: (_, __, args) => getSql()(...args as [TemplateStringsArray, ...unknown[]]),
+  get: (_, prop) => {
+    if (prop === 'unsafe') return (...args: unknown[]) => (getSql() as any).unsafe(...args);
+    return (getSql() as any)[prop];
+  }
+});
 
 interface MoltbookPost {
   id: string;

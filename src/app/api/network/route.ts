@@ -3,14 +3,20 @@ import { neon } from '@neondatabase/serverless';
 
 export const dynamic = 'force-dynamic';
 
-const sql = neon(process.env.DATABASE_URL!);
-
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const limit = parseInt(searchParams.get('limit') || '100');
   const minWeight = parseInt(searchParams.get('minWeight') || '1');
 
   try {
+    if (!process.env.DATABASE_URL) {
+      return NextResponse.json({ 
+        error: 'DATABASE_URL not configured' 
+      }, { status: 500 });
+    }
+    
+    const sql = neon(process.env.DATABASE_URL);
+    
     // Get top connected agents as nodes
     const nodes = await sql`
       SELECT 
@@ -35,7 +41,7 @@ export async function GET(request: Request) {
     const nodeIds = nodes.map(n => n.id);
 
     // Get edges between these nodes
-    const edges = await sql`
+    const edges = nodeIds.length > 0 ? await sql`
       SELECT 
         from_agent_id as source,
         to_agent_id as target,
@@ -44,7 +50,7 @@ export async function GET(request: Request) {
       WHERE from_agent_id = ANY(${nodeIds})
         AND to_agent_id = ANY(${nodeIds})
         AND edge_weight >= ${minWeight}
-    `;
+    ` : [];
 
     return NextResponse.json({
       nodes: nodes.map(n => ({
@@ -53,7 +59,7 @@ export async function GET(request: Request) {
         karma: n.karma,
         connections: Number(n.connections)
       })),
-      edges: edges.map(e => ({
+      edges: edges.map((e: any) => ({
         source: e.source,
         target: e.target,
         weight: e.weight
